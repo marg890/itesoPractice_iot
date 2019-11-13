@@ -28,6 +28,6 @@ _ReSharper*/
 .vs/
 #Nuget packages folder
 packages/
-mqtt_example/.s*
-*.settings.xml
-/Debug/
+mqtt_example/.s**/
+**/\.settings/
+\.settings/

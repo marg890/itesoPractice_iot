@@ -33,7 +33,9 @@ processor_version: 2.0.0
 #define PIN16_IDX                       16u   /*!< Pin number for pin 16 in a port */
 #define PIN17_IDX                       17u   /*!< Pin number for pin 17 in a port */
 #define PIN18_IDX                       18u   /*!< Pin number for pin 18 in a port */
+#define PIN21_IDX                       21u   /*!< Pin number for pin 21 in a port */
 #define PIN22_IDX                       22u   /*!< Pin number for pin 22 in a port */
+#define PIN26_IDX                       26u   /*!< Pin number for pin 26 in a port */
 #define SOPT5_UART0TXSRC_UART_TX      0x00u   /*!< UART 0 transmit data source select: UART0_TX pin */
 
 /*
@@ -72,6 +74,7 @@ void BOARD_InitPins(void) {
   CLOCK_EnableClock(kCLOCK_PortA);                           /* Port A Clock Gate Control: Clock enabled */
   CLOCK_EnableClock(kCLOCK_PortB);                           /* Port B Clock Gate Control: Clock enabled */
   CLOCK_EnableClock(kCLOCK_PortC);                           /* Port C Clock Gate Control: Clock enabled */
+  CLOCK_EnableClock(kCLOCK_PortE);                           /* Port E Clock Gate Control: Clock enabled */
 
   PORT_SetPinMux(PORTA, PIN12_IDX, kPORT_MuxAlt4);           /* PORTA12 (pin 42) is configured as RMII0_RXD1 */
   PORT_SetPinMux(PORTA, PIN13_IDX, kPORT_MuxAlt4);           /* PORTA13 (pin 43) is configured as RMII0_RXD0 */
@@ -113,6 +116,24 @@ void BOARD_InitPins(void) {
     );
   /* PORTB22 (pin 68) is configured as PTB22 */
   PORT_SetPinMux(PORTB, 22U, kPORT_MuxAsGpio);
+  PORT_SetPinMux(PORTE, 26U, kPORT_MuxAsGpio);         /*  */
+  PORT_SetPinMux(PORTB, 21U, kPORT_MuxAsGpio);         /*  */
+
+
+	const port_pin_config_t pin_sw_config = {
+		kPORT_PullUp,                                            /* Internal pull-up resistor is enabled */
+		kPORT_FastSlewRate,                                      /* Fast slew rate is configured */
+		kPORT_PassiveFilterDisable,                              /* Passive filter is disabled */
+		kPORT_OpenDrainEnable,                                   /* Open drain is enabled */
+		kPORT_LowDriveStrength,                                  /* Low drive strength is configured */
+		kPORT_MuxAlt4,                                           /* Pin is configured as RMII0_MDIO */
+		kPORT_UnlockRegister                                     /* Pin Control Register fields [15:0] are not locked */
+	};
+	PORT_SetPinConfig(PORTC, 6U, &pin_sw_config);
+	PORT_SetPinMux(PORTC, 6U, kPORT_MuxAsGpio);
+
+	PORT_SetPinConfig(PORTA, 4U, &pin_sw_config);
+	PORT_SetPinMux(PORTA, 4U, kPORT_MuxAsGpio);
 }
 
 /*******************************************************************************

@@ -95,23 +95,42 @@
 #define APP_THREAD_PRIO DEFAULT_THREAD_PRIO
 
 #define MQTT_CONNECTED_EVT		( 1 << 0 )
-#define MQTT_SENSOR_EVT			( 1 << 1 )
-#define MQTT_SPRINKLERS_EVT		( 1 << 2 )
-#define MQTT_DISCONNECTED_EVT	( 1 << 3 )
+#define MQTT_DISCONNECTED_EVT	( 1 << 1 )
+#define MQTT_SENSOR_TEMP_EVT	( 1 << 2 )
+#define MQTT_SENSOR_KEY_EVT		( 1 << 3 )
+#define MQTT_SENSOR_LIGHT_EVT	( 1 << 4 )
+#define MQTT_DOOR_EVT			( 1 << 5 )
+#define MQTT_PANIC_EVT			( 1 << 6 )
 
-#define BOARD_LED_GPIO BOARD_LED_RED_GPIO
-#define BOARD_LED_GPIO_PIN BOARD_LED_RED_GPIO_PIN
+#define MQTT_IN_DOOR_TOPIC		"/door"
+#define MQTT_IN_DOOR_TOPIC_CNT	5
+#define MQTT_IN_PANIC_TOPIC		"/panic"
+#define MQTT_IN_PANIC_TOPIC_CNT	6
+
+#define MQTT_SENSOR_TEMP_TOPIC	"/temperature"
+#define MQTT_SENSOR_LIGHT_TOPIC	"/light1"
+#define MQTT_SENSOR_KEY_TOPIC	"/key"
+
+#define MQTT_IN_TOPICS			{ MQTT_IN_DOOR_TOPIC, MQTT_IN_PANIC_TOPIC }
+#define MQTT_IN_TOPICS_QOS		{ 0, 0 }
 
 /*******************************************************************************
  * Prototypes
  ******************************************************************************/
 
+static void configure_sw();
 static void connect_to_mqtt(void *ctx);
-static int32_t get_simulated_sensor(int32_t current_value, int32_t max_step,
+/*static int32_t get_simulated_sensor(int32_t current_value, int32_t max_step,
 		                     int32_t min_value, int32_t max_value,
-							 bool increase);
+							 bool increase);*/
 static void sensor_timer_callback(TimerHandle_t pxTimer);
-static void publish_humidity(void *ctx);
+//static void publish_humidity(void *ctx);
+static void publish_temperature(void * ctx);
+static void publish_lights(void * ctx);
+static void publish_key(void * ctx);
+static void sw2_active_task();
+static void sw3_active_task();
+static int32_t get_temperature();
 
 
 /*******************************************************************************
@@ -147,10 +166,19 @@ EventGroupHandle_t xEventGroup;
 
 TimerHandle_t xTimerSensor;
 
-uint32_t humidity_sensor = 50;
 uint32_t samples_cnt = 0;
-bool sprinklers_on;
+uint32_t temp_sensor = 50;
+bool	lights_on 	= false;
+bool	key_in		= false;
 
+bool	mqtt_incoming_panic;
+bool 	panic_on;
+
+bool	mqtt_incoming_door;
+bool	door_closed;
+
+bool	sw2_event;
+bool	sw3_event;
 
 /*******************************************************************************
  * Code
@@ -166,6 +194,7 @@ static void mqtt_topic_subscribed_cb(void *arg, err_t err)
     if (err == ERR_OK)
     {
         PRINTF("Subscribed to the topic \"%s\".\r\n", topic);
+
     }
     else
     {
@@ -182,6 +211,15 @@ static void mqtt_incoming_publish_cb(void *arg, const char *topic, u32_t tot_len
 
     PRINTF("Received %u bytes from the topic \"%s\": \"", tot_len, topic);
 
+    // Define topic
+    if (!memcmp(topic, MQTT_IN_DOOR_TOPIC, MQTT_IN_DOOR_TOPIC_CNT))
+    {
+    	mqtt_incoming_door = true;
+    }
+    else if (!memcmp(topic, MQTT_IN_PANIC_TOPIC, MQTT_IN_PANIC_TOPIC_CNT))
+    {
+    	mqtt_incoming_panic = true;
+    }
 }
 
 /*!
@@ -205,13 +243,29 @@ static void mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t f
         }
     }
 
-    if(!memcmp(data, "On", 2)) {
-    	sprinklers_on = true;
-    	xEventGroupSetBits(xEventGroup,	MQTT_SPRINKLERS_EVT);
+    if (mqtt_incoming_door)
+    {
+    	mqtt_incoming_door = false;
+        if(!memcmp(data, "open", 4)) {
+        	door_closed = false;
+        	xEventGroupSetBits(xEventGroup,	MQTT_DOOR_EVT);
+        }
+        else if(!memcmp(data, "close", 5)) {
+        	door_closed = true;
+        	xEventGroupSetBits(xEventGroup,	MQTT_DOOR_EVT);
+        }
     }
-    else if(!memcmp(data, "Off", 3)) {
-    	sprinklers_on = false;
-    	xEventGroupSetBits(xEventGroup,	MQTT_SPRINKLERS_EVT);
+    else if (mqtt_incoming_panic)
+    {
+    	mqtt_incoming_panic = true;
+        if(!memcmp(data, "On", 2)) {
+        	panic_on = true;
+        	xEventGroupSetBits(xEventGroup,	MQTT_PANIC_EVT);
+        }
+        else if(!memcmp(data, "Off", 1)) {
+        	panic_on = false;
+        	xEventGroupSetBits(xEventGroup,	MQTT_PANIC_EVT);
+        }
     }
 
     if (flags & MQTT_DATA_FLAG_LAST)
@@ -225,8 +279,8 @@ static void mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t f
  */
 static void mqtt_subscribe_topics(mqtt_client_t *client)
 {
-    static const char *topics[] = {"/sprinkler"};
-    int qos[]                   = {1};
+    static const char *topics[] = MQTT_IN_TOPICS;
+    int qos[]                   = MQTT_IN_TOPICS_QOS;
     err_t err;
     int i;
 
@@ -328,6 +382,7 @@ static void mqtt_message_published_cb(void *arg, err_t err)
 /*!
  * @brief Publishes a message. To be called on tcpip_thread.
  */
+/*
 static void publish_humidity(void *ctx)
 {
     static const char *topic   = "/humidity";
@@ -336,12 +391,13 @@ static void publish_humidity(void *ctx)
     LWIP_UNUSED_ARG(ctx);
 
     memset(message, 0, 10);
-    sprintf(message, "%d", humidity_sensor);
+    sprintf(message, "%d", temp_sensor);
 
     PRINTF("Going to publish to the topic \"%s\"...\r\n", topic);
 
     mqtt_publish(mqtt_client, topic, message, strlen(message), 1, 0, mqtt_message_published_cb, (void *)topic);
 }
+//*/
 
 /*!
  * @brief Application thread.
@@ -367,13 +423,18 @@ static void app_thread(void *arg)
     	PRINTF("Error creating the events group\r\n");
     }
 
-    xTimerSensor = xTimerCreate("TimerSns", 1000 / portTICK_PERIOD_MS, pdTRUE, (void*)&timerId, sensor_timer_callback);
+    xTimerSensor = xTimerCreate("TimerSns", 5000 / portTICK_PERIOD_MS, pdTRUE, (void*)&timerId, sensor_timer_callback);
     if( xTimerSensor == NULL ) {
     	PRINTF("Error creating the sensors timer\r\n");
     }
 
     /* Init output LED GPIO. */
-    GPIO_PinInit(BOARD_LED_GPIO, BOARD_LED_GPIO_PIN, &led_config);
+    GPIO_PinInit(BOARD_LED_RED_GPIO, BOARD_LED_RED_GPIO_PIN, &led_config);
+    GPIO_PinInit(BOARD_LED_GREEN_GPIO, BOARD_LED_GREEN_GPIO_PIN, &led_config);
+    GPIO_PinInit(BOARD_LED_BLUE_GPIO, BOARD_LED_BLUE_GPIO_PIN, &led_config);
+    LED_RED_OFF();
+    LED_GREEN_OFF();
+    LED_BLUE_OFF();
 
     /* Wait for address from DHCP */
     PRINTF("Getting IP address from DHCP...\r\n");
@@ -433,10 +494,32 @@ static void app_thread(void *arg)
 		// the event group.  Clear the bits before exiting.
 		uxBits = xEventGroupWaitBits(
 					xEventGroup,	// The event group being tested.
-					MQTT_CONNECTED_EVT | MQTT_SENSOR_EVT | MQTT_SPRINKLERS_EVT | MQTT_DISCONNECTED_EVT,	// The bits within the event group to wait for.
+					MQTT_CONNECTED_EVT		// The bits within the event group to wait for.
+					| MQTT_DISCONNECTED_EVT
+					| MQTT_SENSOR_TEMP_EVT
+					| MQTT_SENSOR_KEY_EVT
+					| MQTT_SENSOR_LIGHT_EVT
+					| MQTT_DOOR_EVT
+					| MQTT_PANIC_EVT,
 					pdTRUE,			// BIT_0 and BIT_4 should be cleared before returning.
 					pdFALSE,		// Don't wait for both bits, either bit will do.
 					xTicksToWait );	// Wait a maximum of 100ms for either bit to be set.
+
+		//*
+		if (sw2_event | sw3_event)
+		{
+			if (sw2_event)
+			{
+				sw2_event = false;
+				sw2_active_task();
+			}
+			else if (sw3_event)
+			{
+				sw3_event = false;
+				sw3_active_task();
+			}
+		}
+		//*/
 
 		if(uxBits == 0) continue;
 
@@ -445,30 +528,65 @@ static void app_thread(void *arg)
 			//Start the sensor timer
 			xTimerStart(xTimerSensor, 0);
 		}
-		else if(uxBits & MQTT_SENSOR_EVT ) {
-			PRINTF("MQTT_SENSOR_EVT.\r\n");
-			// Simulate the humidity %, in steps of 5, range is 10% to 100%.
-			// If the sprinkler is On, the humidity will tent to rise.
-			humidity_sensor = get_simulated_sensor(humidity_sensor, 2, 10, 100, sprinklers_on);
-			if((samples_cnt++%10) == 9){
-				err = tcpip_callback(publish_humidity, NULL);
+		else if(uxBits & MQTT_DISCONNECTED_EVT ) {
+			PRINTF("MQTT_DISCONNECTED_EVT.\r\n");
+		}
+
+		if(uxBits & MQTT_SENSOR_TEMP_EVT ) {
+			//*
+			PRINTF("MQTT_SENSOR_TEMP_EVT.\r\n");
+
+			if((samples_cnt++%5) >= 4){
+
+				// Simulate temperature
+				temp_sensor = get_temperature();
+
+				err = tcpip_callback(publish_temperature, NULL);
 				if (err != ERR_OK)
 				{
 					PRINTF("Failed to invoke publish_humidity on the tcpip_thread: %d.\r\n", err);
 				}
+			} //*/
+		}
+		else if (uxBits & MQTT_SENSOR_KEY_EVT) {
+			PRINTF("MQTT_SENSOR_KEY_EVT.\r\n");
+
+			err = tcpip_callback(publish_key, NULL);
+			if (err != ERR_OK)
+			{
+				PRINTF("Failed to invoke publish_humidity on the tcpip_thread: %d.\r\n", err);
 			}
 		}
-		else if(uxBits & MQTT_SPRINKLERS_EVT ) {
-			PRINTF("MQTT_SPRINKLERS_EVT.\r\n");
-			if(sprinklers_on){
-				GPIO_PortClear(BOARD_LED_GPIO, 1u << BOARD_LED_GPIO_PIN);
+		else if (uxBits & MQTT_SENSOR_LIGHT_EVT) {
+			PRINTF("MQTT_SENSOR_LIGHT_EVT.\r\n");
+
+			err = tcpip_callback(publish_lights, NULL);
+			if (err != ERR_OK)
+			{
+				PRINTF("Failed to invoke publish_humidity on the tcpip_thread: %d.\r\n", err);
+			}
+		}
+		else if(uxBits & MQTT_DOOR_EVT ) {
+			PRINTF("MQTT_DOOR_EVT.\r\n");
+			//*
+			if(door_closed){
+				LED_BLUE_OFF();
 			}
 			else {
-				GPIO_PortSet(BOARD_LED_GPIO, 1u << BOARD_LED_GPIO_PIN);
+				LED_BLUE_ON();
 			}
+			//*/
 		}
-		else if(uxBits & MQTT_DISCONNECTED_EVT ) {
-			PRINTF("MQTT_DISCONNECTED_EVT.\r\n");
+		else if (uxBits & MQTT_PANIC_EVT) {
+			PRINTF("MQTT_PANIC_EVT.\r\n");
+			//*
+			if(panic_on){
+				LED_RED_ON();
+			}
+			else {
+				LED_RED_OFF();
+			}
+			//*/
 		}
 		else
 		{
@@ -488,6 +606,7 @@ int main(void)
     static mem_range_t non_dma_memory[] = NON_DMA_MEMORY_ARRAY;
 #endif /* FSL_FEATURE_SOC_LPC_ENET_COUNT */
     ip4_addr_t fsl_netif0_ipaddr, fsl_netif0_netmask, fsl_netif0_gw;
+
     ethernetif_config_t fsl_enet_config0 = {
         .phyAddress = EXAMPLE_PHY_ADDRESS,
         .clockName  = EXAMPLE_CLOCK_NAME,
@@ -501,6 +620,7 @@ int main(void)
     BOARD_InitPins();
     BOARD_BootClockRUN();
     BOARD_InitDebugConsole();
+    configure_sw();
     /* Disable SYSMPU. */
     base->CESR &= ~SYSMPU_CESR_VLD_MASK;
 
@@ -539,6 +659,7 @@ int main(void)
     return 0;
 }
 
+/*
 int32_t get_simulated_sensor(int32_t current_value, int32_t max_step, int32_t min_value, int32_t max_value, bool increase)
 {
 	uint32_t coin;
@@ -564,10 +685,144 @@ int32_t get_simulated_sensor(int32_t current_value, int32_t max_step, int32_t mi
 	}
 	return current_value;
 }
+//*/
 
 void sensor_timer_callback( TimerHandle_t pxTimer )
 {
-	xEventGroupSetBits(xEventGroup,	MQTT_SENSOR_EVT);
+	xEventGroupSetBits(xEventGroup,	MQTT_SENSOR_TEMP_EVT);
+}
+
+int32_t get_temperature()
+{
+	if (temp_sensor == 25)
+	{
+		return 27;
+	}
+	else
+	return 25;
+}
+
+static void configure_sw()
+{
+	gpio_pin_config_t sw_config = {
+		kGPIO_DigitalInput,
+		0,
+	};
+
+	// SW 2 CONFIGURATION
+    PORT_SetPinInterruptConfig(BOARD_SW2_PORT, BOARD_SW2_GPIO_PIN, kPORT_InterruptFallingEdge);
+    EnableIRQ(BOARD_SW2_IRQ);
+    GPIO_PinInit(BOARD_SW2_GPIO, BOARD_SW2_GPIO_PIN, &sw_config);
+
+	// SW 3 CONFIGURATION
+    PORT_SetPinInterruptConfig(BOARD_SW3_PORT, BOARD_SW3_GPIO_PIN, kPORT_InterruptFallingEdge);
+    EnableIRQ(BOARD_SW3_IRQ);
+    GPIO_PinInit(BOARD_SW3_GPIO, BOARD_SW3_GPIO_PIN, &sw_config);
+}
+
+void BOARD_SW2_IRQ_HANDLER(void)
+{
+	// Switch 2 Event handler
+	GPIO_PortClearInterruptFlags(BOARD_SW2_GPIO, 1U << BOARD_SW2_GPIO_PIN);
+
+	sw2_event = true;
+	//sys_thread_new("sw2_active_task", sw2_active_task, NULL, 512, 3);
+}
+
+void BOARD_SW3_IRQ_HANDLER(void)
+{
+	// Switch 3 Event handler
+	GPIO_PortClearInterruptFlags(BOARD_SW3_GPIO, 1U << BOARD_SW3_GPIO_PIN);
+
+	sw3_event = true;
+	//sys_thread_new("sw3_active_task", sw3_active_task, NULL, 512, 3);
+}
+
+static void sw2_active_task()
+{
+	if (lights_on)
+	{
+		lights_on = false;
+	}
+	else
+	{
+		lights_on = true;
+	}
+
+	xEventGroupSetBits(xEventGroup,	MQTT_SENSOR_LIGHT_EVT);
+}
+
+static void sw3_active_task()
+{
+	if (key_in)
+	{
+		key_in = false;
+	}
+	else
+	{
+		key_in = true;
+	}
+
+	xEventGroupSetBits(xEventGroup,	MQTT_SENSOR_KEY_EVT);
+}
+
+static void publish_temperature(void *ctx)
+{
+    static const char *topic = MQTT_SENSOR_TEMP_TOPIC;
+    static char message[10];
+
+    LWIP_UNUSED_ARG(ctx);
+
+    memset(message, 0, 10);
+    sprintf(message, "%d", temp_sensor);
+
+    PRINTF("Going to publish to the topic \"%s\"...\r\n", topic);
+
+    mqtt_publish(mqtt_client, topic, message, strlen(message), 0, 0, mqtt_message_published_cb, (void *)topic);
+}
+
+static void publish_lights(void *ctx)
+{
+    static const char *topic = MQTT_SENSOR_LIGHT_TOPIC;
+    static char message[10];
+
+    LWIP_UNUSED_ARG(ctx);
+
+    memset(message, 0, 10);
+    if (lights_on)
+    {
+        sprintf(message, "On");
+    }
+    else
+    {
+        sprintf(message, "Off");
+    }
+
+    PRINTF("Going to publish to the topic \"%s\"...\r\n", topic);
+
+    mqtt_publish(mqtt_client, topic, message, strlen(message), 0, 0, mqtt_message_published_cb, (void *)topic);
+}
+
+static void publish_key(void *ctx)
+{
+    static const char *topic = MQTT_SENSOR_KEY_TOPIC;
+    static char message[10];
+
+    LWIP_UNUSED_ARG(ctx);
+
+    memset(message, 0, 10);
+    if (key_in)
+    {
+        sprintf(message, "In");
+    }
+    else
+    {
+        sprintf(message, "Out");
+    }
+
+    PRINTF("Going to publish to the topic \"%s\"...\r\n", topic);
+
+    mqtt_publish(mqtt_client, topic, message, strlen(message), 0, 0, mqtt_message_published_cb, (void *)topic);
 }
 
 #endif
